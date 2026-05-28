@@ -1,0 +1,31 @@
+# LSTM Music Generator Configuration
+model:
+  name: lstm
+  input_dim: 128        # Note range (0-127 MIDI)
+  embedding_dim: 64
+  hidden_dim: 256
+  num_layers: 2
+  dropout: 0.3
+  output_dim: 128
+
+data:
+  dataset: maestro
+  sequence_length: 100   # Notes per training sequence
+  batch_size: 64
+  train_split: 0.85
+  val_split: 0.10
+  test_split: 0.05
+  format: midi
+
+training:
+  epochs: 100
+  learning_rate: 0.001
+  weight_decay: 1e-5
+  grad_clip: 5.0
+  checkpoint_interval: 10
+  device: cpu            # cpu or cuda
+
+generation:
+  temperature: 1.0
+  prime_notes: null      # Optional priming sequence
+  max_notes: 500

@@ -2,20 +2,28 @@
 Dataset download utilities.
 
 Handles downloading and extracting common symbolic music datasets.
+Uses 'requests' if available, falls back to built-in 'urllib' otherwise.
 """
 
 import os
-import io
 import zipfile
 import tarfile
 import logging
-import requests
-from typing import Optional
-from pathlib import Path
+from typing import Optional, Callable
 
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+
+# Try to use requests (better UX); fall back to urllib (built-in)
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
+    import urllib.request
+    import urllib.error
+
 
 # Dataset URLs
 DATASET_SOURCES = {
@@ -33,8 +41,24 @@ DATASET_SOURCES = {
 
 
 def download_file(url: str, dest: str, chunk_size: int = 8192) -> None:
-    """Download a file with progress bar."""
+    """Download a file with progress bar.
+
+    Uses 'requests' if available, otherwise falls back to 'urllib'.
+    """
     logger.info("Downloading %s → %s", url, dest)
+
+    if _HAS_REQUESTS:
+        _download_with_requests(url, dest, chunk_size)
+    else:
+        _download_with_urllib(url, dest, chunk_size)
+
+    size_mb = os.path.getsize(dest) / 1e6
+    logger.info("Downloaded %s (%.1f MB)", dest, size_mb)
+
+
+def _download_with_requests(url: str, dest: str, chunk_size: int) -> None:
+    """Download with requests library (streaming + progress bar)."""
+    import requests
     resp = requests.get(url, stream=True, timeout=30)
     resp.raise_for_status()
 
@@ -49,7 +73,23 @@ def download_file(url: str, dest: str, chunk_size: int = 8192) -> None:
             f.write(chunk)
             pbar.update(len(chunk))
 
-    logger.info("Downloaded %s (%.1f MB)", dest, os.path.getsize(dest) / 1e6)
+
+def _download_with_urllib(url: str, dest: str, chunk_size: int) -> None:
+    """Download with built-in urllib (no external dependency)."""
+    import urllib.request
+
+    def reporthook(block_count: int, block_size: int, total_size: int) -> None:
+        if pbar is None:
+            return
+        downloaded = block_count * block_size
+        pbar.total = total_size if total_size > 0 else None
+        pbar.update(downloaded - pbar.n)
+
+    pbar = tqdm(desc=os.path.basename(dest), unit="B", unit_scale=True)
+    try:
+        urllib.request.urlretrieve(url, dest, reporthook=reporthook)
+    finally:
+        pbar.close()
 
 
 def extract_zip(zip_path: str, extract_dir: str) -> None:
@@ -81,8 +121,18 @@ def download_dataset(
     Returns:
         Path to extracted MIDI files
     """
+    # Handle "custom" — just preprocess whatever is in raw dir
+    if dataset_name == "custom":
+        custom_dir = os.path.join(data_dir, "raw", "custom")
+        if not os.path.isdir(custom_dir):
+            raise FileNotFoundError(
+                f"Custom MIDI directory not found: {custom_dir}\n"
+                f"Place your .mid files in {custom_dir} first."
+            )
+        return custom_dir
+
     if dataset_name not in DATASET_SOURCES:
-        available = list(DATASET_SOURCES.keys())
+        available = list(DATASET_SOURCES.keys()) + ["custom"]
         raise ValueError(f"Unknown dataset '{dataset_name}'. Available: {available}")
 
     source = DATASET_SOURCES[dataset_name]
@@ -111,18 +161,22 @@ def download_dataset(
     # Find the directory that actually has MIDI files
     found = _find_midi_root(raw_dir)
     if found and found != extracted_dir:
-        # Symlink or rename for consistency
-        if not os.path.exists(extracted_dir):
-            os.symlink(found, extracted_dir, target_is_directory=True)
+        # On Windows, os.symlink may fail (needs admin / developer mode)
+        # Use a junction or just return the actual path
+        try:
+            if not os.path.exists(extracted_dir):
+                os.symlink(found, extracted_dir, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            # Symlinks not available (e.g., Windows without developer mode)
+            pass
 
-    return extracted_dir
+    return found or extracted_dir
 
 
 def _find_midi_root(directory: str) -> Optional[str]:
     """Walk extracted directory to find where MIDI files live."""
     from .midi_processor import MidiProcessor
 
-    # First, check if there's a single subdir with MIDI files
     try:
         items = sorted(os.listdir(directory))
     except PermissionError:
@@ -137,11 +191,9 @@ def _find_midi_root(directory: str) -> Optional[str]:
                 midi_dirs.append((item_path, len(files)))
 
     if midi_dirs:
-        # Return the dir with the most MIDI files
         best = max(midi_dirs, key=lambda x: x[1])
         return best[0]
 
-    # Maybe MIDIs are directly in the directory
     files = MidiProcessor.collect_midi_files(directory)
     if files:
         return directory

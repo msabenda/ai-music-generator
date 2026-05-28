@@ -1,4 +1,6 @@
 # Core ML
+# On Windows, if torch install fails, run:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
 torch>=2.0.0
 
 # Audio/MIDI
